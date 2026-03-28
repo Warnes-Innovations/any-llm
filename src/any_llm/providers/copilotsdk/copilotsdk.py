@@ -389,8 +389,7 @@ class CopilotsdkProvider(AnyLLM):
 
             unsubscribe = session.on(on_reasoning)
             try:
-                timeout = kwargs.get("timeout")
-                event = await session.send_and_wait(msg_opts, timeout=timeout)
+                event = await session.send_and_wait(msg_opts)
             finally:
                 unsubscribe()
 
