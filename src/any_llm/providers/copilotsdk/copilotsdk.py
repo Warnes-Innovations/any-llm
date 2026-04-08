@@ -16,6 +16,10 @@ from any_llm.any_llm import AnyLLM
 # is thread-safe from the very first call (lazy initialisation is not thread-safe).
 mimetypes.init()
 
+# Maximum seconds to wait between streaming events (SESSION_IDLE or SESSION_ERROR).
+# Callers may override this per-request via the timeout kwarg.
+_STREAM_TIMEOUT_SECONDS: float = 300.0
+
 MISSING_PACKAGES_ERROR: ImportError | None = None
 try:
     from copilot import CopilotClient, PermissionHandler
@@ -310,6 +314,7 @@ class CopilotsdkProvider(AnyLLM):
         msg_opts: dict[str, Any],
         model_id: str,
         temp_paths: list[str],
+        timeout_secs: float = _STREAM_TIMEOUT_SECONDS,
     ) -> "AsyncIterator[ChatCompletionChunk]":
         """Async generator that streams chunks from a live Copilot session.
 
@@ -337,7 +342,14 @@ class CopilotsdkProvider(AnyLLM):
         try:
             await session.send(msg_opts)
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=timeout_secs)
+                except TimeoutError:
+                    msg = (
+                        f"Copilot streaming timed out after {timeout_secs}s "
+                        "waiting for the next event (SESSION_IDLE or SESSION_ERROR never arrived)."
+                    )
+                    raise RuntimeError(msg) from None
                 if item is None:
                     break
                 kind, delta = item
@@ -370,9 +382,12 @@ class CopilotsdkProvider(AnyLLM):
         if attachments:
             msg_opts["attachments"] = attachments
 
+        timeout: float | None = kwargs.get("timeout")
+        effective_timeout = timeout if timeout is not None else _STREAM_TIMEOUT_SECONDS
+
         if params.stream:
             # Return the async generator directly; it owns the session lifecycle.
-            return self._stream_from_session(session, msg_opts, model_id, temp_paths)
+            return self._stream_from_session(session, msg_opts, model_id, temp_paths, timeout_secs=effective_timeout)
 
         # Non-streaming: capture reasoning alongside the final message event.
         try:
@@ -389,7 +404,7 @@ class CopilotsdkProvider(AnyLLM):
 
             unsubscribe = session.on(on_reasoning)
             try:
-                event = await session.send_and_wait(msg_opts)
+                event = await session.send_and_wait(msg_opts, timeout=timeout)
             finally:
                 unsubscribe()
 
